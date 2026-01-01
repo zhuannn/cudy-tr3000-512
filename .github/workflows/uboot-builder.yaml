@@ -46,6 +46,11 @@ jobs:
       run: |
         cd bl-mt798x
         SOC=mt7981 BOARD=cudy_tr3000-v1 MULTI_LAYOUT=1 ./build.sh
+        if ls output/*.bin >/dev/null 2>&1; then
+          echo "status=success" >> $GITHUB_OUTPUT
+        else
+          echo "status=failure" >> $GITHUB_OUTPUT
+        fi
 
     - name: Organize files
       id: organize
