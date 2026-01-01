@@ -1,0 +1,105 @@
+name: U-Boot Builder
+
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch:
+
+env:
+  REPO_URL: https://github.com/hanwckf/bl-mt798x
+  REPO_BRANCH: master
+  UBOOT_VERSION: 202307
+  UPLOAD_FIRMWARE: true
+  UPLOAD_RELEASE: true
+  TZ: Asia/Shanghai
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Initialization environment
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        sudo apt update
+        sudo apt install -y gcc-aarch64-linux-gnu build-essential flex bison libssl-dev device-tree-compiler python-is-python3
+        sudo timedatectl set-timezone "$TZ"
+
+    - name: Clone source code
+      run: |
+        git clone --depth 1 $REPO_URL -b $REPO_BRANCH bl-mt798x
+
+    - name: Append custom device definition
+      run: |
+        cd bl-mt798x
+        cp ../uboot-mod/mt7981_cudy_tr3000-v1_multi_layout_defconfig ./uboot-mtk-20230718-09eda825/configs/
+        cp ../uboot-mod/mt7981-cudy-tr3000-v1.dts ./uboot-mtk-20230718-09eda825/arch/arm/dts/
+        cp ../uboot-mod/index.html ./uboot-mtk-20230718-09eda825/failsafe/fsdata/index.html
+
+    - name: Compile U-Boot
+      id: compile
+      run: |
+        cd bl-mt798x
+        SOC=mt7981 BOARD=cudy_tr3000-v1 MULTI_LAYOUT=1 ./build.sh
+
+    - name: Organize files
+      id: organize
+      if: steps.compile.outputs.status == 'success'
+      run: |
+        cd bl-mt798x/output
+        # 重命名，添加512后缀
+        for f in *.bin; do
+          mv "$f" "${f%.bin}-512mb.bin"
+        done
+        md5sum *.bin > checksum
+        echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+
+    - name: Upload bin directory
+      uses: actions/upload-artifact@main
+      if: steps.compile.outputs.status == 'success' && env.UPLOAD_FIRMWARE == 'true'
+      with:
+        name: U-Boot-Cudy-TR3000(512MB)
+        path: bl-mt798x/output
+
+    - name: Generate release tag and notes
+      id: release
+      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+      run: |
+        set -e
+        cd bl-mt798x/output
+
+        # 生成基础信息
+        BUILD_TIME=$(date +"%Y%m%d%H%M")
+        RELEASE_NAME="UBoot-${BUILD_TIME}"
+        echo "release_tag=$RELEASE_NAME" >> $GITHUB_OUTPUT
+        echo "🧱 Release name: $RELEASE_NAME"
+
+        # 生成 release note
+        echo "## U-Boot for Cudy TR3000(512MB)" > release.txt
+        echo "- Branch: ${REPO_BRANCH}" >> release.txt
+        echo "- UBoot version: ${UBOOT_VERSION}" >> release.txt
+        echo "- Build time: ${BUILD_TIME}" >> release.txt
+        echo "" >> release.txt
+        echo "### MD5" >> release.txt
+        cat checksum >> release.txt
+
+        # 将路径信息传递出去
+        echo "FIRMWARE_PATH=$PWD" >> $GITHUB_ENV
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: Upload firmware to release
+      uses: softprops/action-gh-release@master
+      if: steps.release.outputs.status == 'success' && !cancelled()
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ steps.release.outputs.release_tag }}
+        name: ${{ steps.release.outputs.release_tag }}
+        body_path: ${{ env.FIRMWARE_PATH }}/release.txt
+        files: |
+          ${{ env.FIRMWARE_PATH }}/*.bin
