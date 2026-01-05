@@ -93,7 +93,7 @@ jobs:
         cd openwrt
         cp -f defconfig/mt7981-ax3000.config .config
         sed -i '/^CONFIG_TARGET_/d' .config
-        cat ../openwrt-mod/config/kmod.config >> .config
+        cat $GITHUB_WORKSPACE/openwrt-mod/config/kmod.config >> .config
         $GITHUB_WORKSPACE/$DIY_P2_SH
 
     - name: Download package
