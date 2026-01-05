@@ -113,12 +113,12 @@ jobs:
         echo "CCACHE_DIR: $CCACHE_DIR"
 
         # 首先尝试多线程编译
-        if make -j$(nproc) CC="ccache gcc" CXX="ccache g++"; then
+        if make -j$(nproc) -k CC="ccache gcc" CXX="ccache g++"; then
           echo "✅ Multi-threaded compilation succeeded"
           echo "status=success" >> $GITHUB_OUTPUT
         else
           echo "⚠️ Multi-threaded compilation failed, retrying with single thread and verbose output..."
-          make -j1 V=s
+          make -j1 -k V=s
           if [ $? -eq 0 ]; then
             echo "✅ Single-threaded compilation succeeded"
             echo "status=success" >> $GITHUB_OUTPUT
