@@ -1,0 +1,233 @@
+name: ImmortalWrt Builder 237 (KMOD)
+
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch:
+
+env:
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+  CCACHE_MAXSIZE: 6G
+  USE_CCACHE: 1
+  REPO_URL: https://github.com/padavanonly/immortalwrt-mt798x-6.6
+  REPO_BRANCH: openwrt-24.10-6.6
+  FEEDS_CONF: feeds.conf.default
+  CONFIG_FILE: openwrt-mod/config/kmod.config
+  DIY_P1_SH: Actions-OpenWrt/diy-part1.sh
+  DIY_P2_SH: Actions-OpenWrt/diy-part2.sh
+  UPLOAD_BIN_DIR: false
+  UPLOAD_FIRMWARE: true
+  UPLOAD_RELEASE: true
+  UPLOAD_KMOD: true
+  TZ: Asia/Shanghai
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Initialization environment
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+        sudo docker image prune --all --force
+        sudo -E apt-get -qq update
+        sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache clang cmake cpio curl device-tree-compiler ecj fastjar flex gawk gettext gcc-multilib g++-multilib git gnutls-dev gperf haveged help2man intltool lib32gcc-s1 libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses-dev libpython3-dev libreadline-dev libssl-dev libtool libyaml-dev libz-dev lld llvm lrzsz mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python3 python3-pip python3-ply python3-docutils python3-pyelftools qemu-utils re2c rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev zstd
+        sudo -E apt-get -qq autoremove --purge
+        sudo -E apt-get -qq clean
+        sudo timedatectl set-timezone "$TZ"
+        sudo mkdir -p /workdir
+        sudo chown $USER:$GROUPS /workdir
+        echo "💾 Disk space after cleanup:"
+        df -hT
+
+    - name: Clone source code
+      working-directory: /workdir
+      run: |
+        df -hT $PWD
+        git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
+        ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
+
+    - name: Append custom device definition
+      run: |
+        cd openwrt/target/linux/mediatek/image
+        cat $GITHUB_WORKSPACE/openwrt-mod/cudy-tr3000-512.mk >> filogic.mk
+        echo "✅ Custom device definition appended to filogic.mk"
+
+    - name: Copy custom DTS file
+      run: |
+        cd openwrt
+        mkdir -p target/linux/mediatek/dts
+        cp -v $GITHUB_WORKSPACE/openwrt-mod/mt7981*.dts target/linux/mediatek/dts/
+
+    # - name: Cache ccache
+    #   uses: actions/cache@v4
+    #   with:
+    #     path: .ccache
+    #     key: openwrt-ccache-${{ runner.os }}
+    #     restore-keys: |
+    #       openwrt-ccache-${{ runner.os }}
+    
+    - name: Load custom feeds
+      run: |
+        [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
+        chmod +x $DIY_P1_SH
+        cd openwrt
+        $GITHUB_WORKSPACE/$DIY_P1_SH
+
+    - name: Update feeds
+      run: cd openwrt && ./scripts/feeds update -a
+
+    - name: Install feeds
+      run: cd openwrt && ./scripts/feeds install -a
+
+    - name: Load custom configuration & Apply 237 configuration
+      run: |
+        [ -e files ] && mv files openwrt/files
+        chmod +x $DIY_P2_SH
+        cd openwrt
+        cp -f defconfig/mt7981-ax3000.config .config
+        sed -i '/^CONFIG_TARGET_/d' .config
+        cat ../openwrt-mod/config/kmod.config >> .config
+        $GITHUB_WORKSPACE/$DIY_P2_SH
+
+    - name: Download package
+      id: package
+      run: |
+        cd openwrt
+        make defconfig
+        make download -j8
+        find dl -size -1024c -exec ls -l {} \;
+        find dl -size -1024c -exec rm -f {} \;
+
+    - name: Compile the firmware
+      id: compile
+      run: |
+        cd openwrt
+        echo "🔨 Starting compilation with $(nproc) threads"
+        echo "CCACHE_DIR: $CCACHE_DIR"
+
+        # 首先尝试多线程编译
+        if make -j$(nproc) CC="ccache gcc" CXX="ccache g++"; then
+          echo "✅ Multi-threaded compilation succeeded"
+          echo "status=success" >> $GITHUB_OUTPUT
+        else
+          echo "⚠️ Multi-threaded compilation failed, retrying with single thread and verbose output..."
+          make -j1 V=s
+          if [ $? -eq 0 ]; then
+            echo "✅ Single-threaded compilation succeeded"
+            echo "status=success" >> $GITHUB_OUTPUT
+          else
+            echo "❌ Compilation failed"
+            echo "status=failure" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+        fi
+
+        # 显示 ccache 统计
+        echo "📊 ccache statistics:"
+        ccache -s
+
+        # 获取设备名称
+        grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
+        [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
+        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+
+    - name: Check space usage
+      if: (!cancelled())
+      run: df -hT
+
+    - name: Upload bin directory
+      uses: actions/upload-artifact@main
+      if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
+      with:
+        name: ImmortalWrt_bin${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+        path: openwrt/bin
+
+    - name: Organize files
+      id: organize
+      if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
+      run: |
+        cd openwrt/bin/targets/*/*
+        # rm -rf packages
+        echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: Upload firmware directory
+      uses: actions/upload-artifact@main
+      if: steps.organize.outputs.status == 'success' && !cancelled()
+      with:
+        name: ImmortalWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+        path: ${{ env.FIRMWARE }}
+
+    - name: Generate release tag and notes
+      id: release
+      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+      run: |
+        set -e
+        cd openwrt/bin/targets/*/*
+
+        # 生成基础信息
+        BUILD_TIME=$(date +"%Y%m%d%H%M")
+        RELEASE_NAME="immortalwrt(mod by 237)-${REPO_BRANCH}-${BUILD_TIME}"
+        echo "release_tag=$RELEASE_NAME" >> $GITHUB_OUTPUT
+
+        echo "🧱 Release name: $RELEASE_NAME"
+        echo "📦 Collecting firmware files..."
+
+        # 筛选固件文件
+        FIRMWARE_FILES=$(ls *squashfs-sysupgrade.bin *initramfs-kernel.bin 2>/dev/null || true)
+        if [ -z "$FIRMWARE_FILES" ]; then
+          echo "❌ 未找到匹配的固件文件 (*.bin)"
+          exit 1
+        fi
+
+        # 计算 sha256 校验
+        echo "🔍 Generating SHA256 checksums..."
+        sha256sum $FIRMWARE_FILES > sha256sums.txt
+
+        echo "✅ 固件列表:"
+        cat sha256sums.txt
+
+        # 生成 release note
+        echo "## ImmortalWrt(mod by 237) for Cudy TR3000(512MB)" > ${{ github.workspace }}/release.txt
+        echo "- Branch: ${REPO_BRANCH}" >> ${{ github.workspace }}/release.txt
+        echo "- Build time: ${BUILD_TIME}" >> ${{ github.workspace }}/release.txt
+        # echo "" >> ${{ github.workspace }}/release.txt
+        # echo "### SHA256" >> ${{ github.workspace }}/release.txt
+        # cat sha256sums.txt >> ${{ github.workspace }}/release.txt
+
+        # 检查是否需要上传 kmod 包
+        if [ "${UPLOAD_KMOD}" = "true" ]; then
+          echo "" >> ${{ github.workspace }}/release.txt
+          echo "🧩 正在打包 kernel modules..."
+          if [ -d packages ]; then
+            tar -czf kmod.tar.gz packages
+            echo "✅ 已生成 kmod.tar.gz"
+          else
+            echo "⚠️ 未找到 packages 目录，跳过 kmod 打包"
+          fi
+        fi
+
+        # 将路径信息传递出去
+        echo "FIRMWARE_PATH=$PWD" >> $GITHUB_ENV
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: Upload firmware to release
+      uses: softprops/action-gh-release@master
+      if: steps.release.outputs.status == 'success' && !cancelled()
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ steps.release.outputs.release_tag }}
+        name: ${{ steps.release.outputs.release_tag }}
+        body_path: ${{ github.workspace }}/release.txt
+        files: |
+          ${{ env.FIRMWARE_PATH }}/*squashfs-sysupgrade.bin
+          ${{ env.FIRMWARE_PATH }}/*initramfs-kernel.bin
+          ${{ env.FIRMWARE_PATH }}/kmod.tar.gz
